@@ -1,0 +1,94 @@
+---
+title: "Data Exploration Assignment-Data Preparation"
+author: Melinda Davis
+format: html
+editor: visual
+---
+
+## Load Libraries
+
+```{r}
+# Load Libraries
+library(rio)
+install_formats()
+library(tidyverse)
+library(stringr)
+library(lubridate)
+library(dplyr)
+library(fixest)
+library(vtable)
+```
+
+## Load Data
+
+Data generated from Google Trends and the College Scorecard are imported from the working directory. Initial cleaning includes converting `monthorweek` variable into a date and removing redundancies in University names.
+
+```{r}
+# Use list.files() to get a vector of filenames
+file_names <- list.files("Lab3_Rawdata", pattern = "trends_up_to_", full.names = TRUE)
+
+# Use import_list() from the rio package to read in the files
+DS <- import_list(file_names, rbind = TRUE, fill = TRUE) 
+
+# Extract the first ten characters from the monthorweek variable
+DS$monthorweek <- str_sub(DS$monthorweek, 1, 10)
+
+# Convert the string to a date using ymd()
+DS$date_variable <- ymd(DS$monthorweek)
+
+# If you want to aggregate to months, you can use floor_date()
+DS$month <- floor_date(DS$date_variable, unit = "month")
+
+# Import Some more data from scorecard
+scorecard_data <- import("Lab3_Rawdata/Most+Recent+Cohorts+(Scorecard+Elements).csv")
+id_name_link <- import("Lab3_Rawdata/id_name_link.csv")
+
+# Count occurrences in id_name_link. Keep only schools that appear once
+id_name_link_counts <- id_name_link %>%
+  group_by(schname) %>%
+  mutate(n = n()) %>%
+  filter(n == 1)  
+
+```
+
+## Aggregate and Merge
+
+With relevant data imported, aggregates are performed, first on `schname` and `keyword`, followed by an aggregation of `schname` and `month`. Data was aggregated by month as opposed to week due to this data likely signaling long term trends. Utilizing month aggregation reduced redundant data and aided in ease of analysis. Data is merged with scorecard_data using an `inner_join` and filtered to account for only bachelor's degree programs. Finally, data is modified by adding dummy variables for before and after the introduction to scorecard, and for high and low earning colleges. The cutoff for high earning colleges was determined via Bureau of Labor Statistics for 2015. The 80th percentile of all incomes from 2015 was used as a benchmark for `HighEarners` for this analysis ([Salary Percentile Calculator for the United States](https://dqydj.com/salary-percentile-calculator/)).
+
+```{r}
+# Aggregate by schname/keyword. Calculate the standardized index
+DS2 <- DS %>%
+  group_by(schname, keyword) %>%
+  mutate(standardized_index = (index - mean(index, na.rm = TRUE)) / sd(index, na.rm = TRUE)) %>%
+  filter(!is.na(standardized_index))
+
+# Aggregate standardized index to school-month level
+agg_school_month <- DS2 %>%
+  group_by(schname, month) %>%
+  summarise(mean_standardized_index = mean(standardized_index, na.rm = TRUE)) 
+
+# Join data. Filter for colleges that predominantly grant Bachelor's 
+merged_data <- inner_join(id_name_link_counts, DS2, by = "schname") %>%
+  inner_join(scorecard_data, by = c("unitid" = "UNITID", "opeid" = "OPEID")) %>%
+  filter(PREDDEG == 3)
+
+# Join data for aggregated at month level. Filter for bachelors
+merged_data2 <- inner_join(id_name_link_counts, agg_school_month, by = "schname") %>%
+  inner_join(scorecard_data, by = c("unitid" = "UNITID", "opeid" = "OPEID")) %>%
+  filter(PREDDEG == 3)
+
+# Remove NULL and PrivacySuppresed data. Rename for clarity. Add binary for if Scorecard exists and highearner
+cleaned_data <- merged_data2 %>%
+  filter(!(`md_earn_wne_p10-REPORTED-EARNINGS` %in% c("PrivacySuppressed"))) %>%
+  filter(!(`md_earn_wne_p10-REPORTED-EARNINGS` %in% c("NULL"))) %>%
+  rename(`ten_year_median_earnings` = `md_earn_wne_p10-REPORTED-EARNINGS`) %>%
+  filter(!(`C150_4_POOLED_SUPP-REPORTED-GRAD-RATE` %in% c("PrivacySuppressed"))) %>%
+  filter(!(`C150_4_POOLED_SUPP-REPORTED-GRAD-RATE` %in% c("NULL"))) %>%
+  rename('Completion_Rate' = 'C150_4_POOLED_SUPP-REPORTED-GRAD-RATE') %>%
+  mutate(ScoreCard = month >= "2015-09-01") %>%
+  mutate(ten_year_median_earnings = as.integer(`ten_year_median_earnings`),  # Convert to integer
+         HighEarner = ten_year_median_earnings > 72000) %>%
+  mutate(Completion_Rate = as.numeric(`Completion_Rate`))
+
+rio::export(cleaned_data, "cleaned_data.csv")
+```
